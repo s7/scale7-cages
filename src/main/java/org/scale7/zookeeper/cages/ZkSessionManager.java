@@ -16,9 +16,13 @@ import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.Watcher.Event.KeeperState;
 import org.scale7.concurrency.ManualResetEvent;
+import org.scale7.portability.SystemProxy;
+import org.slf4j.Logger;
 
 public final class ZkSessionManager implements Watcher {
-	volatile boolean shutdown;	
+	private static final Logger logger = SystemProxy.getLoggerFromFactory(ZkSessionManager.class);
+
+	volatile boolean shutdown;
 	volatile ZooKeeper zooKeeper;
 	final String connectString;
 	final ManualResetEvent isConnected;
@@ -28,17 +32,17 @@ public final class ZkSessionManager implements Watcher {
 	final int sessionTimeout;
 	int maxConnectAttempts;
 	IOException exception;
-		
+
 	public ZkSessionManager(String connectString) throws InterruptedException, IOException, ExecutionException {
 		this(connectString, 6000, 5);
 	}
-	
+
 	public ZkSessionManager(String connectString, int sessionTimeout, int maxConnectAttempts) throws InterruptedException, IOException, ExecutionException {
-		
+
 		if (maxConnectAttempts < 1)
 			throw new IllegalArgumentException("maxConnectAttempts must be greater than or equal to 0");
-		
-		shutdown = false;		
+
+		shutdown = false;
 		this.connectString = connectString;
 		this.sessionTimeout = sessionTimeout;
 		this.maxConnectAttempts = maxConnectAttempts; // TODO should we use this? Throwing here will kill client. Better just keep on waiting..
@@ -51,17 +55,17 @@ public final class ZkSessionManager implements Watcher {
 		connectExecutor.submit(clientCreator).get(); // we know zooKeeper client assigned when past this statement
 		isConnected.waitOne();
 	}
-	
+
 	public void shutdown() throws InterruptedException {
 		shutdown = true;
 		zooKeeper.close();
 		callbackExecutor.shutdownNow();
-	}		
-	
+	}
+
 	public boolean isShutdown() {
 		return shutdown;
 	}
-	
+
 	void retryPrimitiveOperation(Runnable operation, int retries) {
 		if (!shutdown) {
 	    	int delay = 250 + retries * 500;
@@ -70,7 +74,7 @@ public final class ZkSessionManager implements Watcher {
 	    	callbackExecutor.schedule(operation, delay, TimeUnit.MILLISECONDS);
 		}
 	}
-	
+
 	void resurrectPrimitive(ZkSyncPrimitive primitive) {
 		if (!shutdown) {
 			synchronized (resurrectList) {
@@ -85,7 +89,7 @@ public final class ZkSessionManager implements Watcher {
 			}
 		}
 	}
-	
+
 	@Override
 	public void process(WatchedEvent event)  {
 		if (event.getType() == Event.EventType.None) {
@@ -103,26 +107,26 @@ public final class ZkSessionManager implements Watcher {
     		}
 		}
 	}
-	
+
 	/**
 	 * The ZooKeeper client is connected to the ZooKeeper cluster. Actions that modify cluster data may now be
-	 * performed. We notify our sync objects. 
+	 * performed. We notify our sync objects.
 	 */
 	private void onConnected() {
 		isConnected.set();
 		processResurrectList();
 	}
-	
+
 	/**
 	 * We have been disconnected from ZooKeeper. The client will try to reconnect automatically. However, even
 	 * after a successful reconnect, we may miss node creation followed by node deletion event. Furthermore, we
-	 * cannot be *sure* of situation on server while in this state, nor perform actions that require modifying 
+	 * cannot be *sure* of situation on server while in this state, nor perform actions that require modifying
 	 * the server state. This may require special handling so we notify our sync objects.
 	 */
 	private void onDisconnection() {
 		isConnected.reset();
 	}
-	
+
 	/**
 	 * The ZooKeeper session has expired. Initiate the creation of a new client session, and notify our
 	 * sync objects that the session is being reset.
@@ -130,8 +134,8 @@ public final class ZkSessionManager implements Watcher {
 	private void onSessionExpired() {
 		isConnected.reset();
 		connectExecutor.submit(clientCreator);
-	}	
-	
+	}
+
 	/**
 	 * Resurrect those primitives that can resynchronize themselves after session expiry. These are typically
 	 * objects that would rather display the last best known state than no state. For example, a list of
@@ -147,21 +151,21 @@ public final class ZkSessionManager implements Watcher {
 			}
 		}
 	}
-	
+
 	private Callable<ZooKeeper> clientCreator = new Callable<ZooKeeper> () {
 
 		@Override
 		public ZooKeeper call() throws IOException, InterruptedException {
-			
+
 			int attempts = 0;
 			int retryDelay = 50;
-			
+
 			while (true) {
 				try {
 					zooKeeper = new ZooKeeper(connectString, sessionTimeout, ZkSessionManager.this);
 					return zooKeeper;
 				} catch (IOException e) {
-					System.err.println("ZkSessionManager failed to connect client across network to specified cluster...");
+					logger.error("Failed to connect client across network to required ensemble...");
 					attempts++;
 					if (maxConnectAttempts != 0 && attempts >= maxConnectAttempts)
 						throw (IOException)e.getCause();
@@ -170,21 +174,21 @@ public final class ZkSessionManager implements Watcher {
 						retryDelay = 7500;
 				}
 				Thread.sleep(retryDelay);
-			}			
+			}
 		}
 	};
-		
+
 	private static ZkSessionManager instance;
 	//private static Integer mutex = new Integer(-1);
-	
+
 	public static ZkSessionManager instance() {
 		return instance;
 	}
-	
+
 	public static void initializeInstance(String connectString) throws InterruptedException, IOException, ExecutionException {
 		instance = new ZkSessionManager(connectString);
-	}	
-	
+	}
+
 	public static void initializeInstance(String connectString, int sessionTimeout, int maxAttempts) throws InterruptedException, IOException, ExecutionException {
 		instance = new ZkSessionManager(connectString, sessionTimeout, maxAttempts);
 	}
