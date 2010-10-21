@@ -22,10 +22,16 @@ public class ZkPath extends ZkSyncPrimitive {
 	private final String[] pathNodes;
 	private int pathNodesIdx;
 	private final CreateMode createMode;
-	
+	private final byte[] value;
+
 	public ZkPath(String path, CreateMode createMode) {
+		this(path, new byte[0], createMode);
+	}
+	
+	public ZkPath(String path, byte[] value, CreateMode createMode) {
 		super(ZkSessionManager.instance());
-		targetPath = path;
+		this.targetPath = path;
+		this.value = value;
 		this.createMode = createMode;
 		PathUtils.validatePath(targetPath);
 		pathNodes = targetPath.split("/");
@@ -47,7 +53,7 @@ public class ZkPath extends ZkSyncPrimitive {
 				currNodePath.append(pathNodes[i]);
 			}
 				
-			zooKeeper().create(currNodePath.toString(), new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+			zooKeeper().create(currNodePath.toString(), value, ZooDefs.Ids.OPEN_ACL_UNSAFE,
 					createMode, createPathHandler, this);
 		}
 		
