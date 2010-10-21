@@ -5,6 +5,8 @@ import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.AsyncCallback.StringCallback;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.common.PathUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Create a path on ZooKeeper. First an attempt is made to create the target path directly. If this fails
@@ -18,6 +20,8 @@ import org.apache.zookeeper.common.PathUtils;
  */
 public class ZkPath extends ZkSyncPrimitive {
 
+	protected static final Logger LOG = LoggerFactory.getLogger(ZkPath.class);
+	
 	private final String targetPath;
 	private final String[] pathNodes;
 	private int pathNodesIdx;
@@ -52,8 +56,16 @@ public class ZkPath extends ZkSyncPrimitive {
 				currNodePath.append("/");
 				currNodePath.append(pathNodes[i]);
 			}
+			
+			byte[] znodeValue = null;
+			
+			if (pathNodesIdx >= pathNodes.length) {
+				znodeValue = value;
+			} else {
+				znodeValue = new byte[0];
+			}
 				
-			zooKeeper().create(currNodePath.toString(), value, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+			zooKeeper().create(currNodePath.toString(), znodeValue, ZooDefs.Ids.OPEN_ACL_UNSAFE,
 					createMode, createPathHandler, this);
 		}
 		
