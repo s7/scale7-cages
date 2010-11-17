@@ -103,7 +103,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 	 */
 	@Override
 	public String getLockPath() {
-		return zkPath.getPath();
+		return lockPath;
 	}
 
 	@Override
