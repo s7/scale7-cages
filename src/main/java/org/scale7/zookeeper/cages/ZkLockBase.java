@@ -17,9 +17,9 @@ import org.apache.zookeeper.data.Stat;
 
 /**
  * Base class for single path read and write locks.
- * 
- * TODO implement timeouts as basic means to rollback from deadlock. 
- * 
+ *
+ * TODO implement timeouts as basic means to rollback from deadlock.
+ *
  * @author dominicwilliams
  *
  */
@@ -34,7 +34,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 	private boolean tryAcquireOnly;
 	private volatile LockState lockState;
 	private Integer mutex;
-	
+
 	public ZkLockBase(String lockPath) {
 		super(ZkSessionManager.instance());
 		PathUtils.validatePath(lockPath);
@@ -50,7 +50,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 		createRootPath(lockPath);
 		waitSynchronized();
 	}
-	
+
 	/** {@inheritDoc} */
 	@Override
 	public void acquire(ILockListener listener, Object context) throws ZkCagesException, InterruptedException {
@@ -61,7 +61,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 		addDieListener(reportDieToListener);
 		createRootPath(lockPath);
 	}
-	
+
 	/** {@inheritDoc} */
 	@Override
 	public boolean tryAcquire() throws ZkCagesException, InterruptedException {
@@ -71,7 +71,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 		waitSynchronized();
 		return lockState == LockState.Acquired;
 	}
-	
+
 	/** {@inheritDoc} */
 	@Override
 	public void tryAcquire(ITryLockListener listener, Object context) throws ZkCagesException, InterruptedException {
@@ -83,13 +83,13 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 		addDieListener(reportDieToListener);
 		createRootPath(lockPath);
 	}
-	
+
 	/** {@inheritDoc} */
 	@Override
 	public void release() {
 		safeLockState(LockState.Released);
 	}
-	
+
 	/** {@inheritDoc} */
 	@Override
 	public LockState getState()
@@ -103,16 +103,22 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 	 */
 	@Override
 	public String getLockPath() {
-		return zkPath.getPath();
+		return lockPath;
 	}
-	
+
+	@Override
+	public int compareTo(ISinglePathLock other) {
+		int result = getLockPath().compareTo(other.getLockPath());
+		return result == 0 ? (getType() == other.getType() ? 1 : 0): result;
+	}
+
 	private void createRootPath(String path) throws InterruptedException {
 		zkPath = new ZkPath(path, CreateMode.PERSISTENT);
 		// TODO for now only persistent ZK nodes can have children. fix this.
 		zkPath.addUpdateListener(createLockNode, true);
-		zkPath.addDieListener(onLockPathError);		
+		zkPath.addDieListener(onLockPathError);
 	}
-			
+
 	private Runnable onLockPathError = new Runnable () {
 
 		@Override
@@ -122,15 +128,15 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 			// Bubble the killer exception and die!
 			die(zkPath.getKillerException());
 		}
-		
+
 	};
-	
+
 	@Override
 	protected void onDie(ZkCagesException killerException) {
 		// We just set the lock state. The killer exception has already been set by base class
 		safeLockState(LockState.Error);
 	}
-	
+
 	private Runnable createLockNode = new Runnable () {
 
 		@Override
@@ -138,31 +144,31 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 			zooKeeper().create(zkPath.getPath() + "/" + getType() + "-", new byte[0],
 					ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL, createLockNodeHandler, this);
 		}
-		
+
 	};
-		
+
 	private StringCallback createLockNodeHandler = new StringCallback() {
 
 		@Override
 		public void processResult(int rc, String path, Object ctx, String name) {
-			
+
 			if (rc == Code.OK.intValue())
 				thisNodeId = ZkLockNode.getLockNodeIdFromName(name);
 			if (passOrTryRepeat(rc, new Code[] { Code.OK }, (Runnable)ctx))
 				getQueuedLocks.run();
 		}
-		
-	};	
-	
+
+	};
+
 	private Runnable getQueuedLocks = new Runnable () {
 
 		@Override
 		public void run() {
 			zooKeeper().getChildren(zkPath.getPath(), null, queuedLocksHandler, this);
 		}
-		
+
 	};
-	
+
 	private ChildrenCallback queuedLocksHandler = new ChildrenCallback() {
 
 		@Override
@@ -209,18 +215,18 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 				}
 			}
 		}
-		
-	};	
-	
+
+	};
+
 	private Runnable watchBlockingNode = new Runnable() {
 
 		@Override
 		public void run() {
 			zooKeeper().exists(zkPath.getPath() + "/" + blockingNodeId, ZkLockBase.this, blockingNodeHandler, this);
 		}
-		
+
 	};
-	
+
 	private StatCallback blockingNodeHandler = new StatCallback() {
 
 		@Override
@@ -230,32 +236,32 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 			else
 				passOrTryRepeat(rc, new Code[] { Code.OK }, (Runnable)ctx);
 		}
-		
+
 	};
-	
+
 	@Override
 	protected void onNodeDeleted(String path) {
 		getQueuedLocks.run();
 	}
-	
+
 	private Runnable releaseLock = new Runnable () {
 
 		@Override
 		public void run() {
 			zooKeeper().delete(zkPath.getPath() + "/" + thisNodeId, -1, releaseLockHandler, this);
 		}
-		
+
 	};
 
 	private VoidCallback releaseLockHandler = new VoidCallback() {
 
 		@Override
 		public void processResult(int rc, String path, Object ctx) {
-			passOrTryRepeat(rc, new Code[] { Code.OK, Code.NONODE }, (Runnable)ctx); 
+			passOrTryRepeat(rc, new Code[] { Code.OK, Code.NONODE }, (Runnable)ctx);
 		}
-		
+
 	};
-	
+
 	private Runnable reportStateUpdatedToListener = new Runnable() {
 
 		@Override
@@ -269,18 +275,18 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 			else
 				listener.onLockAcquired(ZkLockBase.this, context);
 		}
-		
+
 	};
-	
+
 	private Runnable reportDieToListener = new Runnable() {
 
 		@Override
 		public void run() {
 			listener.onLockError(getKillerException(), ZkLockBase.this, context);
 		}
-		
+
 	};
-		
+
 	/**
 	 * Set the lock state when we know an exception can't be thrown
 	 * @param newState					The new lock state
@@ -293,23 +299,23 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 			assert false : "Unknown condition";
 		}
 	}
-	
+
 	/**
 	 * Set the lock state
 	 * @param newState					The new lock state
 	 * @throws ZkCagesException
 	 */
 	private void setLockState(LockState newState) throws ZkCagesException {
-		
+
 		synchronized (mutex) {
 			switch (newState) {
-			
+
 			case Idle:
 				assert false : "Unknown condition";
-				
+
 			case Waiting:
 				/**
-				 * We only set this state from the public interface methods. This means we can directly throw an 
+				 * We only set this state from the public interface methods. This means we can directly throw an
 				 * exception back at the caller!
 				 */
 				switch (lockState) {
@@ -329,7 +335,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 					assert false : "Unknown condition";
 				}
 				break;
-				
+
 			case Abandoned:
 				/**
 				 * We tried to acquire a lock, but it was already held and we are abandoning our attempt to acquire.
@@ -355,7 +361,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 					assert false : "Unknown condition";
 				}
 				break;
-				
+
 			case Acquired:
 				/**
 				 * We have successfully acquired the lock.
@@ -376,7 +382,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 					assert false : "Unknown condition";
 				}
 				break;
-				
+
 			case Released:
 				/**
 				 * We are releasing a lock. This can be done before a lock has been acquired if an operation is in progress.
@@ -405,7 +411,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 					assert false : "Unknown condition";
 				}
 				break;
-				
+
 			case Error:
 				switch (lockState) {
 				case Released:
@@ -417,7 +423,7 @@ public abstract class ZkLockBase extends ZkSyncPrimitive implements ISinglePathL
 					return;
 				}
 			}
-			
+
 			assert false : "Unknown condition";
 		}
 	}
