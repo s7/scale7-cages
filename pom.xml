@@ -4,7 +4,7 @@
 	<groupId>org.scale7</groupId>
 	<artifactId>scale7-cages</artifactId>
 	<packaging>jar</packaging>
-	<version>0.7.0-SNAPSHOT</version>
+	<version>0.7.1-SNAPSHOT</version>
 	<name>Cages - A library for distributed locking and synchronization using ZooKeeper</name>
 	<url>http://github.com/s7</url>
 	<properties>

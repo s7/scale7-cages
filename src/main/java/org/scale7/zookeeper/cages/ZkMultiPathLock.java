@@ -9,22 +9,7 @@ import org.scale7.networking.utility.NetworkAlgorithms;
 
 /**
  * A class that acquires a set of read and write locks all together, or not at all. The purpose of
- * this class is to prevent the introduction of complex deadlock scenarios in distributed programming
- * environments. Whenever two or more single path locks are acquired sequentially, the possibility of
- * deadlock arises (for example if process A requests r(X) and then requests w(Y), but process B already
- * holds r(Y) and then simultaneously requests w(X)). Detecting closed wait graphs in a distributed
- * environment is difficult and expensive. One solution is for developers to acquire all single
- * lock paths with a timeout, such that in a deadlock situation an exception will be thrown, and hopefully
- * all held locks released as the operation is rolled back. However, there are a number of problems with
- * this approach: (1) developers must be relied upon to set appropriate timeouts (2) developers may
- * have to roll back partially completed operations when an a timeout exception is thrown when they
- * are trying to acquire a nested lock (3) even if developers have handled this complexity
- * correctly, in such situations where deadlock occurs during the period leading up to the timeout
- * many operations and locks may have become queued up, thus leading to a stampede of lock acquisition
- * attempts and a likely repeat of the deadlock occurring. For this reason, it is better to forbid
- * developers from acquiring single lock paths in a nested manner, and to require them to use this
- * q multi-lock system where all locks required for an operation are acquired and released together,
- * thus avoiding the risk of deadlock occurring.
+ * the class is to help prevent the introduction of deadlock scenarios.
  *
  * @author dominicwilliams
  *
@@ -32,7 +17,7 @@ import org.scale7.networking.utility.NetworkAlgorithms;
 public class ZkMultiPathLock implements IMultiPathLock {
 
 	private final int MIN_RETRY_DELAY = 125;
-	private final int MAX_RETRY_DELAY = 8000;
+	private final int MAX_RETRY_DELAY = 4000;
 
 	private ArrayList<ISinglePathLock> locks;
 	private ISinglePathLock[] sortedLocks;
@@ -69,15 +54,38 @@ public class ZkMultiPathLock implements IMultiPathLock {
 	@Override
 	public void acquire() throws ZkCagesException, InterruptedException {
 		setLockState(LockState.Waiting);
-		prepareSortedLockArray();
-		int attempts = 0;
-		while (true) {
-			attempts++;
-			if (doTryAcquire()) {
-				setLockState(LockState.Acquired);
-				return;
+		if (locks.size() == 0) {
+			// We succeed vacuously for zero paths.
+			return;
+		}
+		else if (locks.size() == 1) {
+			// With a single lock path, we can just wait.
+			locks.get(0).acquire();
+		} else {
+			// With multiple paths, we must try to acquire sequentially, then back off completely
+			// if we fail to acquire any
+			prepareSortedLockArray();
+			int attempts = 0;
+			while (true) {
+				attempts++;
+				if (doTryAcquire()) {
+					setLockState(LockState.Acquired);
+					return;
+				}
+				Thread.sleep(NetworkAlgorithms.getBinaryBackoffDelay(attempts, MIN_RETRY_DELAY, MAX_RETRY_DELAY));
+				// To avoid race conditions with asynchronous release process in ZkLockBase, we simply re-create the
+				// sorted locks array before trying again
+				ISinglePathLock[] newSortedLocks = new ISinglePathLock[sortedLocks.length];
+				for (int l = 0; l < sortedLocks.length; l++) {
+					if (sortedLocks[l] instanceof ZkReadLock)
+						newSortedLocks[l] = new ZkReadLock(sortedLocks[l].getLockPath());
+					else if (sortedLocks[l] instanceof ZkWriteLock)
+						newSortedLocks[l] = new ZkWriteLock(sortedLocks[l].getLockPath());
+					else
+						assert false : "Unrecognized lock type";
+				}
+				sortedLocks = newSortedLocks;
 			}
-			Thread.sleep(NetworkAlgorithms.getBinaryBackoffDelay(attempts, MIN_RETRY_DELAY, MAX_RETRY_DELAY));
 		}
 	}
 
@@ -101,8 +109,9 @@ public class ZkMultiPathLock implements IMultiPathLock {
 	}
 
 	/**
-	 * When locks are being acquired sequentially, this will produce the earliest possible back off when
-	 * there is contention (since multi-locks will try to acquire the same paths first)
+	 * When locks are being acquired sequentially, this will produce the earliest possible and least
+	 * expensive back off when there is contention by similar operations (since multi-locks will try
+	 * to acquire the same paths first and conflict as early as possible)
 	 */
 	protected void prepareSortedLockArray() {
 		sortedLocks = locks.toArray(new ISinglePathLock[0]);
@@ -123,20 +132,18 @@ public class ZkMultiPathLock implements IMultiPathLock {
 			if (!tryFailed) {
 				return true;
 			}
-			// otherwise roll back
+			// otherwise roll back any locks we acquired
 			release();
 			return false;
 		} catch (ZkCagesException ex) {
-			// record killer ZooKeeper exception
+			// roll back and re-throw
 			setLockState(LockState.Error);
-			// roll back any locks we have obtained so far
 			release();
-			// re-throw exception
 			throw ex;
 		} catch (InterruptedException ex) {
-			// roll back any locks we have obtained so far
+			// roll back and re-throw
+			setLockState(LockState.Error);
 			release();
-			// re-throw interrupted
 			Thread.currentThread().interrupt();
 			throw ex;
 		}
@@ -152,9 +159,10 @@ public class ZkMultiPathLock implements IMultiPathLock {
 	@Override
 	public void release()  {
 		synchronized (mutex) {
-			for (ILock lock : sortedLocks)
+			for (ILock lock : sortedLocks) {
 				if (lock.getState() == LockState.Acquired)
 					lock.release();
+			}
 		}
 	}
 
