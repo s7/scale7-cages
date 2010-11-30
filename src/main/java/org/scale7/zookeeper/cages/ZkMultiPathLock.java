@@ -54,17 +54,16 @@ public class ZkMultiPathLock implements IMultiPathLock {
 	@Override
 	public void acquire() throws ZkCagesException, InterruptedException {
 		setLockState(LockState.Waiting);
-		if (locks.size() == 0) {
+		if (locks.size() == 0)
 			// We succeed vacuously for zero paths.
 			return;
-		}
-		else if (locks.size() == 1) {
+		prepareSortedLockArray();
+		if (sortedLocks.length == 1) {
 			// With a single lock path, we can just wait.
-			locks.get(0).acquire();
+			sortedLocks[0].acquire();
 		} else {
 			// With multiple paths, we must try to acquire sequentially, then back off completely
 			// if we fail to acquire any
-			prepareSortedLockArray();
 			int attempts = 0;
 			while (true) {
 				attempts++;
@@ -159,10 +158,10 @@ public class ZkMultiPathLock implements IMultiPathLock {
 	@Override
 	public void release()  {
 		synchronized (mutex) {
-			for (ILock lock : sortedLocks) {
-				if (lock.getState() == LockState.Acquired)
-					lock.release();
-			}
+			if (sortedLocks != null)
+				for (ILock lock : sortedLocks)
+					if (lock.getState() == LockState.Acquired)
+						lock.release();
 		}
 	}
 
