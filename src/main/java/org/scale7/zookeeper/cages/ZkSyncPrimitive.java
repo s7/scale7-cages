@@ -11,9 +11,13 @@ import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.Watcher.Event.EventType;
 import org.apache.zookeeper.Watcher.Event.KeeperState;
 import org.scale7.concurrency.ManualResetEvent;
+import org.scale7.portability.SystemProxy;
+import org.slf4j.Logger;
 
 public abstract class ZkSyncPrimitive implements Watcher {
-	
+
+	private static final Logger logger = SystemProxy.getLoggerFromFactory(ZkSyncPrimitive.class);
+
 	/**
 	 * The ZooKeeper session
 	 */
@@ -56,7 +60,7 @@ public abstract class ZkSyncPrimitive implements Watcher {
 	 * Mutex for use synchronizing access to private members
 	 */
 	private Integer mutex;
-	
+
 	protected ZkSyncPrimitive(ZkSessionManager session) {
     	this.session = session;
     	zooKeeper = this.session.zooKeeper;
@@ -68,28 +72,28 @@ public abstract class ZkSyncPrimitive implements Watcher {
     	retries = 0;
     	mutex = new Integer(-1);
     }
-    
+
     /**
      * Wait until the primitive has reached a synchronized state. If the operation was successful,
      * this is triggered when a derived class calls <code>onStateChanged()</code> for the first time. If the
      * operation was unsuccessful, the relevant exception is thrown.
-     * 
+     *
      * @throws KeeperException
      * @throws InterruptedException
      */
 	public void waitSynchronized() throws ZkCagesException, InterruptedException {
 		isSynchronized.waitOne();
-		
+
 		if (getKillerException() == null)
 			return;
-		
+
 		throw getKillerException();
-	}    
-    
+	}
+
     /**
      * Add a listener task to be executed when the object enters the synchronized state, and every time it updates its
      * state thereafter (as marked by derived classes calling <code>onStateUpdated()</code>).
-     * 
+     *
      * @param handler 					The listener task to execute when the state has changed. A weak reference is taken.
      * @param doStartupRun 				If the state of the primitive is already synchronized then run the handler immediately
      */
@@ -105,12 +109,12 @@ public abstract class ZkSyncPrimitive implements Watcher {
     			handler.run();
     		}
     	}
-    }	
-    
+    }
+
     public void removeUpdateListener(Runnable handler) {
     	stateUpdateListeners.remove(handler);
     }
-    
+
     public void addDieListener(Runnable handler) {
     	synchronized (mutex) {
     		if (dieListeners == null) {
@@ -123,16 +127,16 @@ public abstract class ZkSyncPrimitive implements Watcher {
     			handler.run();
     		}
     	}
-    }	    
-	
+    }
+
     /**
-     * Returns whether the synchronization primitive is still valid / alive. 
+     * Returns whether the synchronization primitive is still valid / alive.
      * @return 							Whether this primitive is alive and can be used
      */
     public boolean isAlive() {
     	return killedByException != null;
     }
-    
+
     /**
      * If the primitive has been killed, returns the exception that has killed it.
      * @return							The exception that killed the primitive
@@ -140,21 +144,21 @@ public abstract class ZkSyncPrimitive implements Watcher {
     public ZkCagesException getKillerException() {
     	return killedByException;
     }
-    
+
     /**
-     * Whether this primitive is attempting to resurrect itself after session expiry. 
-     * @return 							Whether the primitive is resynchronizing 
+     * Whether this primitive is attempting to resurrect itself after session expiry.
+     * @return 							Whether the primitive is resynchronizing
      */
     public boolean isResynchronizing() {
     	return resynchronizeNeeded;
     }
-        
+
 	/**
 	 * Must be called by derived classes when they have successfully updated their state.
 	 */
 	protected void onStateUpdated() {
 		synchronized (mutex) {
-			killedByException = null; 
+			killedByException = null;
 			// Notify handlers ***before*** signalling state update to allow pre-processing
 			if (stateUpdateListeners != null) {
 				for (Runnable handler : stateUpdateListeners)
@@ -163,117 +167,117 @@ public abstract class ZkSyncPrimitive implements Watcher {
 			// Signal state updated
 			isSynchronized.set();
 		}
-	}	
-    
+	}
+
     /**
      * If you have indicated that you wish to resurrect your synchronization primitive after a session expiry
      * or other event that would otherwise kill it - for example by returning <code>true</code> from
      * <code>shouldResurrectOnSessionExpiry()</code> - you need to override this method to perform the
-     * re-synchronization steps. You might choose to ressurect/re-synchronize for example in a case where your 
+     * re-synchronization steps. You might choose to ressurect/re-synchronize for example in a case where your
      * primitive maintains a listing of nodes in a cluster, and you would rather maintain the last good known
-     * record and try to re-synchronize rather than blow up in the case where for some reason a session is 
+     * record and try to re-synchronize rather than blow up in the case where for some reason a session is
      * expired - for example after ZooKeeper has temporarily gone down or been partitioned. The ZooKeeper
      * documentation warns against libraries that attempt to re-synchronize, but it seems there are some cases
      * where it is valid to do so.
      */
 	protected void resynchronize() {}
-	
+
 	/**
 	 * Override to be notified of death event.
 	 */
 	protected void onDie(ZkCagesException killerException) {}
-	
+
 	/**
 	 * Override to be notified of connection event.
 	 */
-	protected void onConnected() {}    
-    
+	protected void onConnected() {}
+
     /**
      * Override to be notified of disconnection event.
      */
 	protected void onDisconnected() {}
-    
+
     /**
      * Override to be notified of session expiry event.
      */
 	protected void onSessionExpired() {}
-    
+
     /**
      * Override to be notified of node creation event.
-     * 
+     *
      * @param path 						The created path
      */
 	protected void onNodeCreated(String path) {}
-    
+
     /**
      * Override to be notified of node deletion event.
-     * 
+     *
      * @param path 						The deleted path
      */
 	protected void onNodeDeleted(String path) {}
-    
+
     /**
      * Override to be notified of node data changing event.
-     * 
+     *
      * @param path 						The path of the changed node
      */
 	protected void onNodeDataChanged(String path) {}
-    
+
     /**
      * Override to be notified of node children list changed event.
-     * 
+     *
      * @param path 						The path of the parent node whose children have changed
      */
 	protected void onNodeChildrenChanged(String path) {}
-    
+
     /**
      * Override to indicate whether operations should be retried on error
-     * 
+     *
      * @return 							Whether to retry
      */
 	protected boolean shouldRetryOnError() { return false; }
-    
+
     /**
      * Override to indicate whether operations should be retried on timeout error
-     * 
+     *
      * @return 							Whether to retry
      */
 	protected boolean shouldRetryOnTimeout() { return true; }
-    
+
     /**
      * Override to indicate whether to resurrect the primitive and re-synchronize after session expiry.
      * See the comments for <code>resynchronize()</code> for discussions of rare cases where this is desirable.
-     * Only do this with extreme caution. 
-     * 
+     * Only do this with extreme caution.
+     *
      * @return 							Whether to re-synchronize after session expiry
      */
-	protected boolean shouldResurrectOnSessionExpiry() { return false; }    
-	    
+	protected boolean shouldResurrectOnSessionExpiry() { return false; }
+
     ZooKeeper zooKeeper() {
     	return zooKeeper;
-    }	
-    
+    }
+
     /**
      * Permanently kill this synchronization primitive. It cannot be resurrected.
-     * 
+     *
      * @param rc						The code of the ZooKeeper error that killed this primitive
      */
     protected void die(Code rc) {
     	KeeperException killerException = KeeperException.create(rc);
     	die(killerException);
-    }      
-    
+    }
+
     /**
      * Permanently kill this synchronization primitive. It cannot be resurrected. This method is typically called
-     * by a derived class to pass an exception received from another ZkSyncPrimitive instance it has been using to 
+     * by a derived class to pass an exception received from another ZkSyncPrimitive instance it has been using to
      * implement its algorith
-     * 
+     *
      * @param killerException			The killer exception.
      */
     protected void die(KeeperException killerException) {
     	die(new ZkCagesException(killerException));
     }
-    
+
     protected void die(ZkCagesException killerException) {
     	synchronized (mutex) {
 	    	// Record that we have been killed off by the exception passed by a derived class. This might have been generated
@@ -290,19 +294,19 @@ public abstract class ZkSyncPrimitive implements Watcher {
 	    	isSynchronized.set();
     	}
     }
-    
+
     /**
      * Prepares the next step in an asynchronous execution, based upon the return code from the previous step.
-     * 
+     *
      * @param rc 						The ZooKeeper return code from the previous step
      * @param acceptable 				The acceptable list of return codes from the previous step
      * @param operation					The operation from the previous step (provided so it might be retried
      * @return 							Whether the next step should be started
      */
     protected boolean passOrTryRepeat(int rc, Code[] acceptable, Runnable operation) {
-		
+
 		Code opResult = Code.get(rc);
-		
+
 		for (Code code : acceptable) {
 			if (opResult == code) {
 				retries = 0;
@@ -310,11 +314,13 @@ public abstract class ZkSyncPrimitive implements Watcher {
 			}
 		}
 
+		logger.warn("passOrTryRepeat repeating {} after receiving return code {}", operation.getClass().toString(), opResult.toString());
+
 		switch (opResult) {
 		case CONNECTIONLOSS:
 			retryOnConnect(operation);
 			break;
-		case SESSIONMOVED:	// we assume that this is caused by request flowing over "old" connection. will be resolve with time. 
+		case SESSIONMOVED:	// we assume that this is caused by request flowing over "old" connection. will be resolve with time.
 		case OPERATIONTIMEOUT:
 			if (shouldRetryOnTimeout()) {
 				retryAfterDelay(operation, retries++);
@@ -336,16 +342,16 @@ public abstract class ZkSyncPrimitive implements Watcher {
 			}
 			break;
 		}
-		
+
 		return false;
-	}    
-    
+	}
+
 	@Override
 	public void process(WatchedEvent event)  {
 		String eventPath = event.getPath();
 		EventType eventType = event.getType();
 		KeeperState keeperState = event.getState();
-		
+
 		switch (eventType) {
 		case None:
     		switch (keeperState) {
@@ -357,7 +363,7 @@ public abstract class ZkSyncPrimitive implements Watcher {
     				onConnected();
     				if (retryOnConnect != null) {
     					retryOnConnect.run();
-    					retryOnConnect = null; 
+    					retryOnConnect = null;
     				}
     			}
     			break;
@@ -392,16 +398,16 @@ public abstract class ZkSyncPrimitive implements Watcher {
         	die(Code.SYSTEMERROR);
         	break;
 		}
-	}    
-                		
+	}
+
     private void retryOnConnect(Runnable operation) {
     	retryOnConnect = operation;
-    }  
-    
+    }
+
     private void retryAfterDelay(Runnable operation, int retries) {
     	session.retryPrimitiveOperation(operation, retries);
     }
-    
+
     private void requestRessurrection() {
     	session.resurrectPrimitive(this);
     }
