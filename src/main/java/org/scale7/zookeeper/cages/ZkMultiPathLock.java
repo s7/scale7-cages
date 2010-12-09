@@ -6,6 +6,9 @@ import java.util.List;
 
 import org.apache.commons.lang.NotImplementedException;
 import org.scale7.networking.utility.NetworkAlgorithms;
+import org.scale7.portability.SystemProxy;
+import org.scale7.zookeeper.cages.ZkCagesException.Error;
+import org.slf4j.Logger;
 
 /**
  * A class that acquires a set of read and write locks all together, or not at all. The purpose of
@@ -16,8 +19,11 @@ import org.scale7.networking.utility.NetworkAlgorithms;
  */
 public class ZkMultiPathLock implements IMultiPathLock {
 
+	private static final Logger logger = SystemProxy.getLoggerFromFactory(ZkMultiPathLock.class);
+
 	private final int MIN_RETRY_DELAY = 125;
 	private final int MAX_RETRY_DELAY = 4000;
+	private final int MAX_ACQUIRE_ATTEMPTS = 10;
 
 	private ArrayList<ISinglePathLock> locks;
 	private ISinglePathLock[] sortedLocks;
@@ -66,13 +72,21 @@ public class ZkMultiPathLock implements IMultiPathLock {
 			// if we fail to acquire any
 			int attempts = 0;
 			while (true) {
-				attempts++;
+				// Try to acquire paths
 				if (doTryAcquire()) {
+					// got them
 					setLockState(LockState.Acquired);
 					return;
 				}
+				// Not this time, and we give up and throw after max attempts
+				attempts++;
+				if (attempts > MAX_ACQUIRE_ATTEMPTS) {
+					logger.warn("Max attempts to acquire paths exceeded for {}", describe());
+					throw new ZkCagesException(Error.MAX_ATTEMPTS_EXCEEDED);
+				}
+				// Otherwise back off a little then try again
 				Thread.sleep(NetworkAlgorithms.getBinaryBackoffDelay(attempts, MIN_RETRY_DELAY, MAX_RETRY_DELAY));
-				// To avoid race conditions with asynchronous release process in ZkLockBase, we simply re-create the
+				// To avoid race conditions with the asynchronous release system used by ZkLockBase, we simply re-create the
 				// sorted locks array before trying again
 				ISinglePathLock[] newSortedLocks = new ISinglePathLock[sortedLocks.length];
 				for (int l = 0; l < sortedLocks.length; l++) {
@@ -86,6 +100,17 @@ public class ZkMultiPathLock implements IMultiPathLock {
 				sortedLocks = newSortedLocks;
 			}
 		}
+	}
+
+	private String describe() {
+		String description = "";
+		for (int l = 0; l < sortedLocks.length; l++) {
+			if (sortedLocks[l] instanceof ZkReadLock)
+				description += "ZkReadLock(" + sortedLocks[l].getLockPath() + ") ";
+			else if (sortedLocks[l] instanceof ZkWriteLock)
+				description += "ZkWriteLock(" + sortedLocks[l].getLockPath() + ") ";
+		}
+		return description;
 	}
 
 	/** {@inheritDoc} */

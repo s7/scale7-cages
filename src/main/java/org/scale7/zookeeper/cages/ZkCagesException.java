@@ -4,7 +4,7 @@ import org.apache.zookeeper.KeeperException;
 
 @SuppressWarnings("serial")
 public class ZkCagesException extends Exception {
-	
+
 	public enum Error {
 		ZOOKEEPER_EXCEPTION,
 		INTERRUPTED_EXCEPTION,
@@ -13,9 +13,10 @@ public class ZkCagesException extends Exception {
 		LOCK_ALREADY_ACQUIRED,
 		LOCK_ALREADY_RELEASED,
 		LOCK_RELEASED_WHILE_WAITING,
+		MAX_ATTEMPTS_EXCEEDED,
 		UNKNOWN_ERROR,
 	}
-	
+
 	private Error error;
 	private KeeperException keeperException;
 
@@ -24,15 +25,15 @@ public class ZkCagesException extends Exception {
 		error = Error.ZOOKEEPER_EXCEPTION;
 		this.keeperException = keeperException;
 	}
-	
+
 	public ZkCagesException(Error error) {
 		this.error = error;
 	}
-	
+
 	public Error getErrorCode() {
 		return error;
 	}
-	
+
 	public KeeperException getKeeperException() {
 		return keeperException;
 	}
