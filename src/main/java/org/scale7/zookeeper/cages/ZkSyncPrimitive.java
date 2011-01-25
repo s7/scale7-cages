@@ -19,11 +19,11 @@ public abstract class ZkSyncPrimitive implements Watcher {
 	private static final Logger logger = SystemProxy.getLoggerFromFactory(ZkSyncPrimitive.class);
 
 	/**
-	 * The ZooKeeper session
+	 * The ZooKeeper session handle
 	 */
 	ZooKeeper zooKeeper;
 	/**
-	 * The parent/manager/context for the ZooKeeper session
+	 * The manager of the ZooKeeper session with operate within
 	 */
 	private ZkSessionManager session;
 	/**
@@ -31,19 +31,13 @@ public abstract class ZkSyncPrimitive implements Watcher {
 	 */
 	private List<Runnable> stateUpdateListeners;
 	/**
-	 * Tasks to be run when the primitive enters into an unsynchronnized state
+	 * Tasks to be run when the primitive enters into an unsynchronized state i.e. on session expiry
 	 */
 	private List<Runnable> dieListeners;
 	/**
-	 * Event that indicates that our state is synchronized and "ready" to use
+	 * Event that indicates that our state is synchronized and "ready" and client can proceed
 	 */
 	private ManualResetEvent isSynchronized;
-	/**
-	 * Indicates that re-synchronization is needed on connect. Only occurs in rare case we try to recover
-	 * from session expiry e.g. when derived class prefers to offer stale data than offer no data. This is
-	 * special case and for most synch primitives e.g. lock recovery has to happen application level.
-	 */
-	private volatile boolean resynchronizeNeeded;
 	/**
 	 * Exception indicating what killed this synchronization primitive
 	 */
@@ -51,7 +45,7 @@ public abstract class ZkSyncPrimitive implements Watcher {
 	/**
 	 * Interrupted task in asynchronous operation sequence, which needs to be re-run on connect.
 	 */
-	private Runnable retryOnConnect;
+	Runnable retryOnConnect;
 	/**
 	 * Number of attempts retrying a task interrupted by some error e.g. timeout
 	 */
@@ -67,7 +61,6 @@ public abstract class ZkSyncPrimitive implements Watcher {
     	stateUpdateListeners = null;
     	dieListeners = null;
     	isSynchronized = new ManualResetEvent(false);
-    	resynchronizeNeeded = false;
     	retryOnConnect = null;
     	retries = 0;
     	mutex = new Integer(-1);
@@ -76,7 +69,7 @@ public abstract class ZkSyncPrimitive implements Watcher {
     /**
      * Wait until the primitive has reached a synchronized state. If the operation was successful,
      * this is triggered when a derived class calls <code>onStateChanged()</code> for the first time. If the
-     * operation was unsuccessful, the relevant exception is thrown.
+     * operation was unsuccessful, an exception is thrown.
      *
      * @throws KeeperException
      * @throws InterruptedException
@@ -145,21 +138,14 @@ public abstract class ZkSyncPrimitive implements Watcher {
     	return killedByException;
     }
 
-    /**
-     * Whether this primitive is attempting to resurrect itself after session expiry.
-     * @return 							Whether the primitive is resynchronizing
-     */
-    public boolean isResynchronizing() {
-    	return resynchronizeNeeded;
-    }
-
 	/**
 	 * Must be called by derived classes when they have successfully updated their state.
 	 */
 	protected void onStateUpdated() {
 		synchronized (mutex) {
 			killedByException = null;
-			// Notify handlers ***before*** signalling state update to allow pre-processing
+			// Notify handlers ***before*** signalling syncrhonized state to allow handlers to perform
+			// some pre-processing / prepare the way for a blocked main client thread to proceed
 			if (stateUpdateListeners != null) {
 				for (Runnable handler : stateUpdateListeners)
 					handler.run();
@@ -251,7 +237,7 @@ public abstract class ZkSyncPrimitive implements Watcher {
      *
      * @return 							Whether to re-synchronize after session expiry
      */
-	protected boolean shouldResurrectOnSessionExpiry() { return false; }
+	protected boolean shouldResurrectAfterSessionExpiry() { return false; }
 
     ZooKeeper zooKeeper() {
     	return zooKeeper;
@@ -314,32 +300,26 @@ public abstract class ZkSyncPrimitive implements Watcher {
 			}
 		}
 
-		logger.warn("passOrTryRepeat repeating {} after receiving return code {}", operation.getClass().toString(), opResult.toString());
+		// The operation result was not acceptable. We will either retry or die....
 
 		switch (opResult) {
 		case CONNECTIONLOSS:
-			retryOnConnect(operation);
+	    	retryOnConnect = operation;
+	    	session.restartPrimitiveWhenConnected(this);
 			break;
 		case SESSIONMOVED:	// we assume that this is caused by request flowing over "old" connection. will be resolve with time.
 		case OPERATIONTIMEOUT:
-			if (shouldRetryOnTimeout()) {
+			if (shouldRetryOnTimeout())
 				retryAfterDelay(operation, retries++);
-			}
 			break;
 		case SESSIONEXPIRED:
-			if (shouldResurrectOnSessionExpiry()) {
-				resynchronizeNeeded = true;
-				requestRessurrection();
-			} else {
-				die(opResult);
-			}
+			onSessionExpiry(opResult);
 			break;
 		default:
-			if (shouldRetryOnError()) {
+			if (shouldRetryOnError())
 				retryAfterDelay(operation, retries++);
-			} else {
+			else
 				die(opResult);
-			}
 			break;
 		}
 
@@ -348,39 +328,17 @@ public abstract class ZkSyncPrimitive implements Watcher {
 
 	@Override
 	public void process(WatchedEvent event)  {
+
 		String eventPath = event.getPath();
 		EventType eventType = event.getType();
 		KeeperState keeperState = event.getState();
 
+		if (keeperState == KeeperState.Expired) {
+			onSessionExpiry(Code.SESSIONEXPIRED);
+			return;
+		}
+
 		switch (eventType) {
-		case None:
-    		switch (keeperState) {
-    		case SyncConnected:
-    			if (resynchronizeNeeded) {
-    				resynchronizeNeeded = false;
-    				resynchronize();
-    			} else {
-    				onConnected();
-    				if (retryOnConnect != null) {
-    					retryOnConnect.run();
-    					retryOnConnect = null;
-    				}
-    			}
-    			break;
-    		case Disconnected:
-    			onDisconnected();
-    			break;
-    		case Expired:
-    			if (shouldResurrectOnSessionExpiry()) {
-    				resynchronizeNeeded = true;
-    				requestRessurrection();
-    			} else {
-    				die(Code.SESSIONEXPIRED);
-    			}
-    			onSessionExpired();
-    			break;
-    		}
-			break;
 		case NodeCreated:
 			onNodeCreated(eventPath);
 			break;
@@ -400,15 +358,15 @@ public abstract class ZkSyncPrimitive implements Watcher {
 		}
 	}
 
-    private void retryOnConnect(Runnable operation) {
-    	retryOnConnect = operation;
-    }
+	private void onSessionExpiry(Code dieReason) {
+		if (shouldResurrectAfterSessionExpiry()) {
+			logger.debug("Registering {} for resurrection when new session", this.getClass());
+			session.resurrectPrimitiveWhenNewSession(this);
+		} else
+			die(dieReason);
+	}
 
     private void retryAfterDelay(Runnable operation, int retries) {
     	session.retryPrimitiveOperation(operation, retries);
-    }
-
-    private void requestRessurrection() {
-    	session.resurrectPrimitive(this);
     }
 }
