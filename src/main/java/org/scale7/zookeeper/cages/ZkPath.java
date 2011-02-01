@@ -5,8 +5,6 @@ import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.AsyncCallback.StringCallback;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.common.PathUtils;
-import org.slf4j.Logger;
-import org.scale7.portability.SystemProxy;
 
 /**
  * Create a path on ZooKeeper. First an attempt is made to create the target path directly. If this fails
@@ -19,8 +17,7 @@ import org.scale7.portability.SystemProxy;
  *
  */
 public class ZkPath extends ZkSyncPrimitive {
-	private static final Logger logger = SystemProxy.getLoggerFromFactory(ZkSyncPrimitive.class);
-	
+
 	private final String targetPath;
 	private final String[] pathNodes;
 	private int pathNodesIdx;
