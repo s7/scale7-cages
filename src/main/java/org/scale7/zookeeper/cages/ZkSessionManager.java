@@ -5,7 +5,6 @@ import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -14,6 +13,7 @@ import java.util.concurrent.TimeUnit;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.Watcher.Event.KeeperState;
 import org.scale7.concurrency.ManualResetEvent;
 import org.scale7.portability.SystemProxy;
@@ -28,16 +28,18 @@ public final class ZkSessionManager implements Watcher {
 	final ManualResetEvent isConnected;
 	final ExecutorService connectExecutor;
 	final ScheduledExecutorService callbackExecutor;
-	final Set<ZkSyncPrimitive> resurrectList;
+	Set<ZkSyncPrimitive> currResurrectList;
+	Set<ZkSyncPrimitive> currRestartOnConnectList;
+	Integer retryMutex = new Integer(-1); // controls access to *current* retry lists
 	final int sessionTimeout;
 	int maxConnectAttempts;
 	IOException exception;
 
-	public ZkSessionManager(String connectString) throws InterruptedException, IOException, ExecutionException {
+	public ZkSessionManager(String connectString) {
 		this(connectString, 6000, 5);
 	}
 
-	public ZkSessionManager(String connectString, int sessionTimeout, int maxConnectAttempts) throws InterruptedException, IOException, ExecutionException {
+	public ZkSessionManager(String connectString, int sessionTimeout, int maxConnectAttempts) {
 
 		if (maxConnectAttempts < 1)
 			throw new IllegalArgumentException("maxConnectAttempts must be greater than or equal to 0");
@@ -48,12 +50,15 @@ public final class ZkSessionManager implements Watcher {
 		this.maxConnectAttempts = maxConnectAttempts; // TODO should we use this? Throwing here will kill client. Better just keep on waiting..
 		isConnected = new ManualResetEvent(false);
 		callbackExecutor = Executors.newScheduledThreadPool(8);
-		resurrectList = Collections.newSetFromMap(new WeakHashMap<ZkSyncPrimitive, Boolean>());
 		exception = null;
 
 		connectExecutor = Executors.newSingleThreadExecutor();
-		connectExecutor.submit(clientCreator).get(); // we know zooKeeper client assigned when past this statement
-		isConnected.waitOne();
+		try {
+			connectExecutor.submit(clientCreator).get(); // we know zooKeeper client assigned when past this statement
+			isConnected.waitOne();
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		}
 	}
 
 	public void shutdown() throws InterruptedException {
@@ -75,18 +80,19 @@ public final class ZkSessionManager implements Watcher {
 		}
 	}
 
-	void resurrectPrimitive(ZkSyncPrimitive primitive) {
-		if (!shutdown) {
-			synchronized (resurrectList) {
-				if (primitive.zooKeeper != this.zooKeeper) {
-					// We already have a new ZooKeeper client the primitive can use to resurrect itself.
-					primitive.zooKeeper = this.zooKeeper;
-					primitive.resynchronize();
-				} else {
-					// Save a reference to the primitive for later resurrection.
-					resurrectList.add(primitive);
-				}
-			}
+	void restartPrimitiveWhenConnected(ZkSyncPrimitive primitive) {
+		synchronized (retryMutex) {
+			if (currRestartOnConnectList == null)
+				currRestartOnConnectList = Collections.newSetFromMap(new WeakHashMap<ZkSyncPrimitive, Boolean>());
+			currRestartOnConnectList.add(primitive);
+		}
+	}
+
+	void resurrectPrimitiveWhenNewSession(ZkSyncPrimitive primitive) {
+		synchronized (retryMutex) {
+			if (currResurrectList == null)
+				currResurrectList = Collections.newSetFromMap(new WeakHashMap<ZkSyncPrimitive, Boolean>());
+			currResurrectList.add(primitive);
 		}
 	}
 
@@ -94,6 +100,7 @@ public final class ZkSessionManager implements Watcher {
 	public void process(WatchedEvent event)  {
 		if (event.getType() == Event.EventType.None) {
     		KeeperState state = event.getState();
+    		logger.debug("process {}", state);
     		switch (state) {
     		case SyncConnected:
     			onConnected();
@@ -110,11 +117,36 @@ public final class ZkSessionManager implements Watcher {
 
 	/**
 	 * The ZooKeeper client is connected to the ZooKeeper cluster. Actions that modify cluster data may now be
-	 * performed. We notify our sync objects.
+	 * performed. Any primitives that were previously suspended after disconnection must be restarted, and any
+	 * primitives that wished to be resurrected after session expiry, must be asked to resynchronize
 	 */
 	private void onConnected() {
+		// We need to process the resurrection list
+		synchronized (retryMutex) {
+			// We are going to process the existing lists. We take a copy of the lists and reset them to null to
+			// avoid potential re-entrancy problems if the client becomes disconnected again while restarting the
+			// waiting primitives thus causing them to try to re-add themselves to these lists.
+			Set<ZkSyncPrimitive> resurrectList = currResurrectList;
+			Set<ZkSyncPrimitive> restartOnConnectList = currRestartOnConnectList;
+			currResurrectList = null;
+			currRestartOnConnectList = null;
+			// Process resurrection list...
+			if (resurrectList != null) {
+				logger.info("onConnected processing currResurrectList.size {}", resurrectList.size());
+				for (ZkSyncPrimitive primitive : resurrectList) {
+					primitive.zooKeeper = this.zooKeeper; // assign new client
+					primitive.resynchronize();
+				}
+			}
+			// Process restart on re-connection list
+			if (restartOnConnectList != null)
+				for (ZkSyncPrimitive primitive : restartOnConnectList) {
+					Runnable restart = primitive.retryOnConnect;
+					primitive.retryOnConnect = null; // this may be re-assigned by running if disconnect again
+					restart.run();
+				}
+		}
 		isConnected.set();
-		processResurrectList();
 	}
 
 	/**
@@ -128,28 +160,26 @@ public final class ZkSessionManager implements Watcher {
 	}
 
 	/**
-	 * The ZooKeeper session has expired. Initiate the creation of a new client session, and notify our
-	 * sync objects that the session is being reset.
+	 * The ZooKeeper session has expired. We need to initiate the creation of a new client session. Primitives
+	 * that are currently suspended while waiting for re-connection must now be killed, except for the rare case
+	 * where they can be resurrected when there is a new session.
 	 */
 	private void onSessionExpired() {
-		isConnected.reset();
-		connectExecutor.submit(clientCreator);
-	}
-
-	/**
-	 * Resurrect those primitives that can resynchronize themselves after session expiry. These are typically
-	 * objects that would rather display the last best known state than no state. For example, a list of
-	 * servers cooperating in a cluster.
-	 */
-	private void processResurrectList() {
-		synchronized (resurrectList) {
-			ZkSyncPrimitive[] toResurrect = resurrectList.toArray(new ZkSyncPrimitive[] {});
-			resurrectList.clear(); // clear before resynchronizing to prevent reentrancy issues
-			for (ZkSyncPrimitive primitive : toResurrect) {
-				primitive.zooKeeper = this.zooKeeper;
-				primitive.resynchronize();
+		synchronized (retryMutex) {
+			// Primitives waiting for reconnection before continuing their operations must now die, except for the
+			// rare case they wish to be resurrected when there is a new session
+			if (currRestartOnConnectList != null) {
+				for (ZkSyncPrimitive primitive : currRestartOnConnectList)
+					if (primitive.shouldResurrectAfterSessionExpiry())
+						currResurrectList.add(primitive);
+					else
+						primitive.die(Code.SESSIONEXPIRED);
+				// Clear the reconnect list now
+				currRestartOnConnectList.clear();
 			}
 		}
+		isConnected.reset();
+		connectExecutor.submit(clientCreator);
 	}
 
 	private Callable<ZooKeeper> clientCreator = new Callable<ZooKeeper> () {
@@ -185,11 +215,11 @@ public final class ZkSessionManager implements Watcher {
 		return instance;
 	}
 
-	public static void initializeInstance(String connectString) throws InterruptedException, IOException, ExecutionException {
+	public static void initializeInstance(String connectString) {
 		instance = new ZkSessionManager(connectString);
 	}
 
-	public static void initializeInstance(String connectString, int sessionTimeout, int maxAttempts) throws InterruptedException, IOException, ExecutionException {
+	public static void initializeInstance(String connectString, int sessionTimeout, int maxAttempts) {
 		instance = new ZkSessionManager(connectString, sessionTimeout, maxAttempts);
 	}
 }

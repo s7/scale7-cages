@@ -32,12 +32,9 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 	 */
 	private volatile Set<String> set;
 	/**
-	 * Whether the class should return the "last known" value of the contributed key set if the set becomes unsynchronized.
-	 * This is valuable in situations where, for example, the ZooKeeper cluster is temporarily unreachable but where say
-	 * the contributed keys represent the nodes in a server cluster and its desirable that the cluster members can still be
-	 * reached.
+	 * Whether this class should automatically re-synchronize with the contributed set, and re-add its members, after session expiry
 	 */
-	private final boolean allowDirty;
+	private final boolean resurrectAfterExpiry;
 	/**
 	 * Values that this instance successfully contributed to the distributed key set
 	 */
@@ -51,11 +48,11 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 	 * The values that this instance has attempts to contribute to the distributed key set.
 	 */
 	private String[] myContribution;
-		
+
 	/**
 	 * Maintains the contents of a set to which each connected user contributes members. Note
-	 * that in a contributed set, each user of the set owns the entries they have created. When such a 
-	 * user disconnects from ZooKeeper, then all the entries they created will be automatically deleted. 
+	 * that in a contributed set, each user of the set owns the entries they have created. When such a
+	 * user disconnects from ZooKeeper, then all the entries they created will be automatically deleted.
 	 * This makes a contributed set useful for scenarios such as cluster node management.
 	 * @param session			The ZooKeeper session manager
 	 * @param path				The path uniquely identifying the distributed set
@@ -63,25 +60,25 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 	 * @param allowDirty		Whether the set should try to recover from a "dead" state and continue showing "dirty" values while unsynchronized (session expired)
 	 * @throws InterruptedException
 	 */
-	public ZkContributedKeySet(String path, String[] myContribution, boolean allowDirty) throws InterruptedException {
+	public ZkContributedKeySet(String path, String[] myContribution, boolean resurrectAfterExpiry) throws InterruptedException {
 		super(ZkSessionManager.instance());
 		this.set = new HashSet<String>();
 		this.successfulContributions = new ConcurrentHashMap<String, Boolean>();
 		this.failedContributions = new ConcurrentHashMap<String, Boolean>();
 		this.rootPath = path;
-		this.allowDirty = allowDirty;
+		this.resurrectAfterExpiry = resurrectAfterExpiry;
 		this.myContribution = myContribution;
 		resynchronize();
 	}
-	
+
 	/**
 	 * The complete set of entries created by the contributions of connected ZkContributedSet instances
-	 * @return					The set of all the entries in the shared contributed set				
+	 * @return					The set of all the entries in the shared contributed set
 	 */
 	public Set<String> getKeySet() {
 		return set;
 	}
-	
+
 	/**
 	 * A list of entries that we contributed, and which will be removed when our session to ZooKeeper is closed or expires
 	 * @return					The entries that this instance contributed so the set
@@ -91,7 +88,7 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 		Collections.unmodifiableSet(successful);
 		return successful;
 	}
-	
+
 	/**
 	 * A list of entries that we contributed, but which had already been contributed by someone else.
 	 * @return					The entries that this instance tried to contribute to the set, but which were contributed by another ZkContributedSet instance
@@ -101,12 +98,16 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 		Collections.unmodifiableSet(failed);
 		return failed;
 	}
-	
+
 	/**
-	 * Change your entry nodes.
-	 * @param myContribution			What you now wish your entries to consist of
-	 * @throws KeeperException 
-	 * @throws InterruptedException 
+	 * Change your entry nodes. Note that the adjustment is not reflected immediately although any listeners
+	 * will only report the set has been updated when the contribution has been completely changed (i.e. you do not
+	 * get multiple update notifications while you are deleting previous entries and adding new ones). If this method
+	 * throws an exception because of a Zookeeper session expiry, then when session is reestablished the set will try
+	 * to reset its contribution to that it was making before the method was called.
+	 * @param myContribution			A new list of entries you wish to contribute to the set
+	 * @throws KeeperException
+	 * @throws InterruptedException
 	 */
 	public void adjustMyContribution(String[] myContribution) throws InterruptedException, KeeperException {
 		synchronized (this) {
@@ -114,6 +115,7 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 			Set<String> myObsoleteEntries = new HashSet<String>(Arrays.asList(this.myContribution));
 			Set<String> myNewEntries = new HashSet<String>(Arrays.asList(myContribution));
 			myObsoleteEntries.removeAll(myNewEntries);
+
 			// Delete obsolete entries
 			for (String entry : myObsoleteEntries) {
 				zooKeeper().delete(rootPath + "/" + entry, -1);
@@ -128,29 +130,37 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 					recordCreationResult(entry, ex.code());
 				}
 			}
+
+			// Once successful, we update our contribution. If session expiry causes this method to fail before
+			// reaching this point, and we are configured to resynchronize on reconnection, then we will reset
+			// ourselves to the state we had before calling the method.
+			this.myContribution = myContribution;
 		}
 	}
-			
-	@Override 
-	protected boolean shouldResurrectOnSessionExpiry() {
-		return allowDirty;
+
+	@Override
+	protected boolean shouldResurrectAfterSessionExpiry() {
+		return resurrectAfterExpiry;
 	}
-	
+
 	@Override
 	protected void resynchronize() {
+		myEntryIdx = 0;
 		successfulContributions.clear();
 		failedContributions.clear();
 		entryNodeCreator.run();
-	}	
-	
+	}
+
 	@Override
 	protected void onNodeChildrenChanged(String path) {
-		entriesRequestor.run();
+		synchronized (this) { // so that we see result of adjustMyContribution() in a single stage
+			entriesRequestor.run();
+		}
 	}
-	
-	private int myEntryIdx;	
+
+	private int myEntryIdx;
 	private Runnable entryNodeCreator = new Runnable() {
-		
+
 		@Override
 		public void run() {
 			if (myEntryIdx < myContribution.length) {
@@ -161,9 +171,9 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 				entriesRequestor.run();
 			}
 		}
-		
+
 	};
-	
+
 	private StringCallback entryNodeCreatorResultHandler = new StringCallback() {
 
 		@Override
@@ -174,9 +184,9 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 			if (passOrTryRepeat(rc, new Code[] { Code.OK, Code.NODEEXISTS}, (Runnable)ctx))
 					entryNodeCreator.run();
 		}
-		
-	};	
-	
+
+	};
+
 	private Runnable entriesRequestor = new Runnable() {
 
 		@Override
@@ -195,9 +205,9 @@ public class ZkContributedKeySet extends ZkSyncPrimitive {
 				onStateUpdated();
 			}
 		}
-		
-	};	
-	
+
+	};
+
 	private void recordCreationResult(String entryName, Code rc) {
 		if (rc == Code.OK)
 			successfulContributions.put(entryName, true);
