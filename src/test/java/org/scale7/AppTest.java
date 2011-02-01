@@ -11,14 +11,12 @@ import org.scale7.zookeeper.cages.ZkReadLock;
 import org.scale7.zookeeper.cages.ZkSessionManager;
 import org.scale7.zookeeper.cages.ZkWriteLock;
 
-import junit.framework.TestCase;
-
-public class AppTest extends TestCase
+public class AppTest extends AbstractIntegrationTest
 {
     @Override
 	protected void setUp() throws Exception {
 		super.setUp();
-        ZkSessionManager.initializeInstance("localhost:2181/UnitTests", 1000, Integer.MAX_VALUE);
+        ZkSessionManager.initializeInstance(zkAddress + ":" + zkPort + "/UnitTests", 1000, Integer.MAX_VALUE);
 	}
 
 	@Override
