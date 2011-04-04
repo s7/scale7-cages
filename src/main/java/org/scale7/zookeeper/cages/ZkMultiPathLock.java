@@ -215,6 +215,16 @@ public class ZkMultiPathLock implements IMultiPathLock {
 		return getLockPathsByType(ILock.LockType.Write);
 	}
 
+	/** {@inheritDoc} */
+	@Override
+	public LockType contains(String lockPath) {
+		ISinglePathLock[] currLocks = lockState == LockState.Idle ? locks.toArray(new ISinglePathLock[0]) : sortedLocks;
+		for (ISinglePathLock lock : currLocks)
+			if (lock.getLockPath().equals(lockPath))
+				return lock.getType();
+		return LockType.None;
+	}
+
 	private String[] getLockPathsByType(ILock.LockType type) {
 		ArrayList<String> lockPaths = new ArrayList<String>(32);
 		List<ISinglePathLock> lockList = locks;
