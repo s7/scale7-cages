@@ -238,8 +238,8 @@ public abstract class ZkSyncPrimitive implements Watcher {
      * @return 							Whether to re-synchronize after session expiry
      */
 	protected boolean shouldResurrectAfterSessionExpiry() { return false; }
-
-    ZooKeeper zooKeeper() {
+	    
+    protected ZooKeeper zooKeeper() {
     	return zooKeeper;
     }
 

@@ -5,8 +5,6 @@ import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.AsyncCallback.StringCallback;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.common.PathUtils;
-import org.scale7.portability.SystemProxy;
-import org.slf4j.Logger;
 
 /**
  * Create a path on ZooKeeper. First an attempt is made to create the target path directly. If this fails
@@ -19,20 +17,25 @@ import org.slf4j.Logger;
  *
  */
 public class ZkPath extends ZkSyncPrimitive {
-	private static final Logger logger = SystemProxy.getLoggerFromFactory(ZkSyncPrimitive.class);
 
 	private final String targetPath;
 	private final String[] pathNodes;
 	private int pathNodesIdx;
 	private final CreateMode createMode;
+	private final byte[] value;
 
 	public ZkPath(String path) {
 		this(path, CreateMode.PERSISTENT);
 	}
 
 	public ZkPath(String path, CreateMode createMode) {
+		this(path, new byte[0], createMode);
+	}
+	
+	public ZkPath(String path, byte[] value, CreateMode createMode) {
 		super(ZkSessionManager.instance());
-		targetPath = path;
+		this.targetPath = path;
+		this.value = value;
 		this.createMode = createMode;
 		PathUtils.validatePath(targetPath);
 		pathNodes = targetPath.split("/");
@@ -57,9 +60,16 @@ public class ZkPath extends ZkSyncPrimitive {
 				}
 				toCreate = currNodePath.toString();
 			}
-			//logger.debug("ZkPath calling zooKeeper().create({})", toCreate);
-
-			zooKeeper().create(toCreate, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+			
+			byte[] znodeValue = null;
+			
+			if (pathNodesIdx >= pathNodes.length) {
+				znodeValue = value;
+			} else {
+				znodeValue = new byte[0];
+			}
+			
+			zooKeeper().create(toCreate, znodeValue, ZooDefs.Ids.OPEN_ACL_UNSAFE,
 					createMode, createPathHandler, this);
 		}
 	};
